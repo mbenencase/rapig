@@ -1,0 +1,15 @@
+{
+    "endpoints": [
+        { "base": "https://jsonplaceholder.typicode.com", "path": "/todos", "port": 443 },
+        {
+            "base": "https://jsonplaceholder.typicode.com/users",
+            "path": "/secure-users",
+            "port": 443,
+            "strip_prefix": true,
+            "auth": {
+                "header_name": "my-auth-header",
+                "expected_value": "let-me-in-123"
+            }
+        }
+    ]
+}
