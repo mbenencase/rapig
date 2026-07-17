@@ -62,6 +62,28 @@ async fn proxy_handler(
         return Err(StatusCode::NOT_FOUND);
     };
 
+    // =======================================
+    // Dynamic Auth
+    // =======================================
+    if let Some(auth) = &endpoint.auth {
+        let header_value = req.headers().get(&auth.header_name);
+        let is_authorized = match header_value {
+            Some(val) => val.to_str().unwrap_or("") == auth.expected_value,
+            None => false,
+        };
+
+        if !is_authorized {
+            tracing::warn!(
+                "Unauthorized access to {}. Invalid or missing '{}'",
+                path,
+                auth.header_name
+            );
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+
+        tracing::info!("Authentication successful for {}", path);
+    }
+
     let downstream_url = if query.is_empty() {
         format!("{}{}", endpoint.base, path)
     } else {
