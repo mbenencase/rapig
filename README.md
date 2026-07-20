@@ -4,7 +4,7 @@
 
 Rust API Gateway
 
-![](./assets/RAPIG.jpg)
+![](./assets/RAPIG.png)
 
 ## Overview
 
