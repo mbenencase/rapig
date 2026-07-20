@@ -9,3 +9,8 @@ test:
 
 run:
 	cargo run
+
+check:
+	cargo fmt
+	cargo clippy
+	cargo test
