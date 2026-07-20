@@ -1,6 +1,10 @@
 # RAPIG
 
+![](https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white)
+
 Rust API Gateway
+
+![](./assets/RAPIG.jpg)
 
 ## Overview
 
