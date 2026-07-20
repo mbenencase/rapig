@@ -9,6 +9,7 @@ use axum::{
 };
 use parser::Config;
 use std::sync::Arc;
+use std::time::Instant;
 use tower_http::trace::TraceLayer;
 
 struct AppState {
@@ -19,6 +20,8 @@ struct AppState {
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
+        .json()
+        .flatten_event(true)
         .with_max_level(tracing::Level::INFO)
         .init();
 
@@ -51,14 +54,30 @@ async fn proxy_handler(
 ) -> Result<Response<Body>, StatusCode> {
     let path = req.uri().path();
     let query = req.uri().query().unwrap_or_default();
+    let method = req.method().clone();
+
+    // Attempt to extract a trace ID from the incoming headers, or default to "unknown"
+    let trace_id = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("unknown");
 
     let endpoint = state
         .config
         .endpoints
         .iter()
         .find(|e| path.starts_with(&e.path));
+
     let Some(endpoint) = endpoint else {
-        tracing::warn!("No routing config found for path: {}", path);
+        // STRUCTURED LOG: 404 Error
+        tracing::warn!(
+            "trace_id" = trace_id,
+            "http.path" = %path,
+            "http.method" = %method,
+            "http.status_code" = 404,
+            "No routing config found for path"
+        );
         return Err(StatusCode::NOT_FOUND);
     };
 
@@ -73,15 +92,17 @@ async fn proxy_handler(
         };
 
         if !is_authorized {
+            // STRUCTURED LOG: Auth Failure
             tracing::warn!(
-                "Unauthorized access to {}. Invalid or missing '{}'",
-                path,
-                auth.header_name
+                "trace_id" = trace_id,
+                "http.path" = %path,
+                "gateway.auth_status" = "failed",
+                "gateway.auth_header" = %auth.header_name,
+                "http.status_code" = 401,
+                "Unauthorized access attempt"
             );
             return Err(StatusCode::UNAUTHORIZED);
         }
-
-        tracing::info!("Authentication successful for {}", path);
     }
 
     let downstream_url = if query.is_empty() {
@@ -89,30 +110,41 @@ async fn proxy_handler(
     } else {
         format!("{}{}?{}", endpoint.base, path, query)
     };
-    tracing::info!("Proxying request to: {}", downstream_url);
 
-    let method = req.method().clone();
     let mut headers = req.headers().clone();
-
     headers.remove(axum::http::header::HOST);
 
     let body_bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
+    // Start timing the request
+    let start = Instant::now();
+
     let res = state
         .http_client
-        .request(method, downstream_url)
+        .request(method.clone(), &downstream_url)
         .headers(headers)
         .body(body_bytes)
         .send()
         .await
         .map_err(|e| {
-            tracing::error!("Upstream request failed: {}", e);
+            // STRUCTURED LOG: Upstream Failure
+            tracing::error!(
+                "trace_id" = trace_id,
+                "http.path" = %path,
+                "gateway.upstream_url" = %downstream_url,
+                "error" = %e,
+                "http.status_code" = 502,
+                "Upstream request failed"
+            );
             StatusCode::BAD_GATEWAY
         })?;
 
-    let mut response_builder = axum::http::Response::builder().status(res.status());
+    let request_time = start.elapsed();
+    let status_code = res.status();
+
+    let mut response_builder = axum::http::Response::builder().status(status_code);
     if let Some(headers_mut) = response_builder.headers_mut() {
         for (k, v) in res.headers() {
             headers_mut.insert(k, v.clone());
@@ -123,6 +155,19 @@ async fn proxy_handler(
         .bytes()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // STRUCTURED LOG: Successful Request
+    // This perfectly matches the "Universal Metadata" and "Request & Response Context" guide
+    tracing::info!(
+        "trace_id" = trace_id,
+        "http.method" = %method,
+        "http.path" = %path,
+        "http.status_code" = status_code.as_u16(),
+        "http.latency_ms" = request_time.as_millis(),
+        "gateway.upstream_url" = %downstream_url,
+        "HTTP request processed"
+    );
+
     Ok(response_builder.body(Body::from(res_bytes)).unwrap())
 }
 
