@@ -8,8 +8,7 @@ use axum::{
     response::Response,
 };
 use parser::Config;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 use tower_http::trace::TraceLayer;
 
 struct AppState {
@@ -52,16 +51,19 @@ async fn proxy_handler(
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
 ) -> Result<Response<Body>, StatusCode> {
-    let path = req.uri().path();
-    let query = req.uri().query().unwrap_or_default();
+    // FIX: Convert the borrowed &str into an owned String immediately
+    let path = req.uri().path().to_string();
+    let query = req.uri().query().unwrap_or_default().to_string();
     let method = req.method().clone();
 
-    // Attempt to extract a trace ID from the incoming headers, or default to "unknown"
+    // FIX: Convert the extracted trace ID string slice into an owned String.
+    // If it's missing, we provide an owned String "unknown".
     let trace_id = req
         .headers()
         .get("x-request-id")
         .and_then(|h| h.to_str().ok())
-        .unwrap_or("unknown");
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
 
     let endpoint = state
         .config
@@ -72,7 +74,7 @@ async fn proxy_handler(
     let Some(endpoint) = endpoint else {
         // STRUCTURED LOG: 404 Error
         tracing::warn!(
-            "trace_id" = trace_id,
+            "trace_id" = %trace_id,
             "http.path" = %path,
             "http.method" = %method,
             "http.status_code" = 404,
@@ -82,7 +84,7 @@ async fn proxy_handler(
     };
 
     // =======================================
-    // Dynamic Auth
+    // Handling Dynamic Auth Header
     // =======================================
     if let Some(auth) = &endpoint.auth {
         let header_value = req.headers().get(&auth.header_name);
@@ -92,9 +94,8 @@ async fn proxy_handler(
         };
 
         if !is_authorized {
-            // STRUCTURED LOG: Auth Failure
             tracing::warn!(
-                "trace_id" = trace_id,
+                "trace_id" = %trace_id,
                 "http.path" = %path,
                 "gateway.auth_status" = "failed",
                 "gateway.auth_header" = %auth.header_name,
@@ -118,7 +119,6 @@ async fn proxy_handler(
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    // Start timing the request
     let start = Instant::now();
 
     let res = state
@@ -129,9 +129,8 @@ async fn proxy_handler(
         .send()
         .await
         .map_err(|e| {
-            // STRUCTURED LOG: Upstream Failure
             tracing::error!(
-                "trace_id" = trace_id,
+                "trace_id" = %trace_id,
                 "http.path" = %path,
                 "gateway.upstream_url" = %downstream_url,
                 "error" = %e,
@@ -156,16 +155,13 @@ async fn proxy_handler(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // STRUCTURED LOG: Successful Request
-    // This perfectly matches the "Universal Metadata" and "Request & Response Context" guide
     tracing::info!(
-        "trace_id" = trace_id,
+        "trace_id" = %trace_id,
         "http.method" = %method,
         "http.path" = %path,
         "http.status_code" = status_code.as_u16(),
         "http.latency_ms" = request_time.as_millis(),
-        "gateway.upstream_url" = %downstream_url,
-        "HTTP request processed"
+        "gateway.upstream_url" = %downstream_url
     );
 
     Ok(response_builder.body(Body::from(res_bytes)).unwrap())
